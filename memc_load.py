@@ -7,15 +7,20 @@ import glob
 import logging
 import collections
 from optparse import OptionParser
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 # brew install protobuf
 # protoc  --python_out=. ./appsinstalled.proto
 # pip install protobuf
 import appsinstalled_pb2
 # pip install python-memcached
-import memcache
+from pymemcache.client.base import Client
+from pymemcache.client.retrying import RetryingClient
+from pymemcache.exceptions import MemcacheUnexpectedCloseError
 
 
 NORMAL_ERR_RATE = 0.01
+DEFAULT_DIRECTORY = os.environ.get('DIRLOCATION', '/data/appsinstalled')
 AppsInstalled = collections.namedtuple(
     "AppsInstalled",
     [
@@ -38,14 +43,18 @@ def insert_appsinstalled(memc_addr, appsinstalled, dry_run=False):
     key = "%s:%s" % (appsinstalled.dev_type, appsinstalled.dev_id)
     ua.apps.extend(appsinstalled.apps)
     packed = ua.SerializeToString()
-    # @TODO persistent connection
-    # @TODO retry and timeouts!
     try:
         if dry_run:
             logging.debug(
                 "%s - %s -> %s" % (memc_addr, key, str(ua).replace("\n", " ")))
         else:
-            memc = memcache.Client([memc_addr])
+            base_client = Client(memc_addr, connect_timeout=0.5, timeout=0.3)
+            memc = RetryingClient(
+                base_client,
+                attempts=3,
+                retry_delay=0.01,
+                retry_for=[MemcacheUnexpectedCloseError]
+            )
             memc.set(key, packed)
     except Exception as e:
         logging.exception("Cannot write to memc %s: %s" % (memc_addr, e))
@@ -80,33 +89,43 @@ def main(options):
         "dvid": options.dvid,
     }
     for fn in glob.iglob(options.pattern):
-        processed = errors = 0
-        logging.info('Processing %s' % fn)
-        fd = gzip.open(fn)
-        for line in fd:
-            line = line.strip()
-            if not line:
-                continue
-            appsinstalled = parse_appsinstalled(line)
-            if not appsinstalled:
-                errors += 1
-                continue
-            memc_addr = device_memc.get(appsinstalled.dev_type)
-            if not memc_addr:
-                errors += 1
-                logging.error(
-                    "Unknown device type: %s" % appsinstalled.dev_type
+        all_futures = []
+        with ThreadPoolExecutor() as executor:
+            processed = errors = 0
+            logging.info('Processing %s' % fn)
+            fd = gzip.open(fn)
+            for line in fd:
+                line = line.strip().decode('utf-8')
+                if not line:
+                    continue
+                appsinstalled = parse_appsinstalled(line)
+                if not appsinstalled:
+                    errors += 1
+                    continue
+                memc_addr = device_memc.get(appsinstalled.dev_type)
+                if not memc_addr:
+                    errors += 1
+                    logging.error(
+                        "Unknown device type: %s" % appsinstalled.dev_type
+                    )
+                    continue
+                feature = executor.submit(
+                    insert_appsinstalled,
+                    memc_addr, appsinstalled,
+                    options.dry
                 )
+                all_futures.append(feature)
+
+            for future in as_completed(all_futures):
+                ok = feature.result()
+                if ok:
+                    processed += 1
+                else:
+                    errors += 1
+            if not processed:
+                fd.close()
+                dot_rename(fn)
                 continue
-            ok = insert_appsinstalled(memc_addr, appsinstalled, options.dry)
-            if ok:
-                processed += 1
-            else:
-                errors += 1
-        if not processed:
-            fd.close()
-            dot_rename(fn)
-            continue
 
         err_rate = float(errors) / processed
         if err_rate < NORMAL_ERR_RATE:
@@ -142,9 +161,10 @@ if __name__ == '__main__':
     op = OptionParser()
     op.add_option("-t", "--test", action="store_true", default=False)
     op.add_option("-l", "--log", action="store", default=None)
+    op.add_option("--maxworkers", action="store", default=5)
     op.add_option("--dry", action="store_true", default=False)
     op.add_option("--pattern", action="store",
-                  default="/data/appsinstalled/*.tsv.gz")
+                  default=f"{DEFAULT_DIRECTORY}/*.tsv.gz")
     op.add_option("--idfa", action="store", default="127.0.0.1:33013")
     op.add_option("--gaid", action="store", default="127.0.0.1:33014")
     op.add_option("--adid", action="store", default="127.0.0.1:33015")
