@@ -6,6 +6,7 @@ import sys
 import glob
 import logging
 import collections
+import subprocess
 from optparse import OptionParser
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -72,7 +73,7 @@ def parse_appsinstalled(line):
     try:
         apps = [int(a.strip()) for a in raw_apps.split(",")]
     except ValueError:
-        apps = [int(a.strip()) for a in raw_apps.split(",") if a.isidigit()]
+        apps = [int(a.strip()) for a in raw_apps.split(",") if a.isdigit()]
         logging.info("Not all user apps are digits: `%s`" % line)
     try:
         lat, lon = float(lat), float(lon)
@@ -141,20 +142,9 @@ def main(options):
         dot_rename(fn)
 
 
-def prototest():
-    sample = "idfa\t1rfw452y52g2gq4g\t55.55\t42.42\t1423,43,567,3,7,23\ngaid\t7rfw452y52g2gq4g\t55.55\t42.42\t7423,424"  # noqa E501
-    for line in sample.splitlines():
-        dev_type, dev_id, lat, lon, raw_apps = line.strip().split("\t")
-        apps = [int(a) for a in raw_apps.split(",") if a.isdigit()]
-        lat, lon = float(lat), float(lon)
-        ua = appsinstalled_pb2.UserApps()
-        ua.lat = lat
-        ua.lon = lon
-        ua.apps.extend(apps)
-        packed = ua.SerializeToString()
-        unpacked = appsinstalled_pb2.UserApps()
-        unpacked.ParseFromString(packed)
-        assert ua == unpacked
+def runtest():
+    command = ['python', '-m', 'unittest', '-v']
+    subprocess.run(command)
 
 
 if __name__ == '__main__':
@@ -175,7 +165,7 @@ if __name__ == '__main__':
                         format='[%(asctime)s] %(levelname).1s %(message)s',
                         datefmt='%Y.%m.%d %H:%M:%S')
     if opts.test:
-        prototest()
+        runtest()
         sys.exit(0)
 
     logging.info("Memc loader started with options: %s" % opts)
