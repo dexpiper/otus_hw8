@@ -90,7 +90,7 @@ def main(options):
         "dvid": options.dvid,
     }
     for fn in glob.iglob(options.pattern):
-        all_futures = []
+        all_features = []
         with ThreadPoolExecutor() as executor:
             processed = errors = 0
             logging.info('Processing %s' % fn)
@@ -115,9 +115,9 @@ def main(options):
                     memc_addr, appsinstalled,
                     options.dry
                 )
-                all_futures.append(feature)
+                all_features.append(feature)
 
-            for future in as_completed(all_futures):
+            for feature in as_completed(all_features):
                 ok = feature.result()
                 if ok:
                     processed += 1
