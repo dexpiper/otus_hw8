@@ -19,7 +19,7 @@ cd to directory with memc_load.py
 ## Memcache working example:
 
 `$ memcache -l 127.0.0.1:33013, 127.0.0.1:33014, 127.0.0.1:33015, 127.0.0.1:33016`
-`$ python3 -m memx_load --log=log2.log`
+`$ python3 -m memc_load --log=log2.log`
 
 `[2022.03.19 14:57:05] I Memc loader started with options: {'test': False, 'log': 'log2.log', 'maxworkers': 3, 'dry': False, 'pattern': '/home/alex/Downloads/tarz/*.tsv.gz', 'idfa': '127.0.0.1:33013', 'gaid': '127.0.0.1:33014', 'adid': '127.0.0.1:33015', 'dvid': '127.0.0.1:33016'}`
 `[2022.03.19 14:57:05] I Processing /home/alex/Downloads/tarz/20170929000000.tsv.gz`
