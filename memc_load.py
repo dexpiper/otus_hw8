@@ -10,14 +10,11 @@ import subprocess
 from optparse import OptionParser
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# brew install protobuf
-# protoc  --python_out=. ./appsinstalled.proto
-# pip install protobuf
-import appsinstalled_pb2
-# pip install python-memcached
 from pymemcache.client.base import Client
 from pymemcache.client.retrying import RetryingClient
 from pymemcache.exceptions import MemcacheUnexpectedCloseError
+
+import appsinstalled_pb2
 
 
 NORMAL_ERR_RATE = 0.01
@@ -151,7 +148,7 @@ if __name__ == '__main__':
     op = OptionParser()
     op.add_option("-t", "--test", action="store_true", default=False)
     op.add_option("-l", "--log", action="store", default=None)
-    op.add_option("--maxworkers", action="store", default=5)
+    op.add_option("--maxworkers", action="store", default=3)
     op.add_option("--dry", action="store_true", default=False)
     op.add_option("--pattern", action="store",
                   default=f"{DEFAULT_DIRECTORY}/*.tsv.gz")

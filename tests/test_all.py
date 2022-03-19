@@ -1,10 +1,11 @@
 import unittest
-
+from unittest.mock import patch, _ANY
 import appsinstalled_pb2
-from memc_load import parse_appsinstalled
+from memc_load import (insert_appsinstalled, parse_appsinstalled,
+                       dot_rename, AppsInstalled)
 
 
-class TestProtoBuff(unittest.TestCase):
+class TestUnits(unittest.TestCase):
 
     def test_protobaf_serializer(self):
         sample = "idfa\t1rfw452y52g2gq4g\t55.55\t42.42\t1423,43,567,3,7,23\ngaid\t7rfw452y52g2gq4g\t55.55\t42.42\t7423,424"  # noqa E501
@@ -20,6 +21,12 @@ class TestProtoBuff(unittest.TestCase):
             unpacked = appsinstalled_pb2.UserApps()
             unpacked.ParseFromString(packed)
             self.assertEqual(ua, unpacked)
+
+    @patch('os.rename')
+    def test_dot_rename(self, mock):
+        path = '/home/username/misc/12145678.tsv.gz'
+        dot_rename(path)
+        mock.assert_called_with(path, '/home/username/misc/.12145678.tsv.gz')
 
     def test_parse_appinstalled_general(self):
         with open('tests/fixtures/sample.tsv', 'r') as file:
@@ -59,3 +66,27 @@ class TestProtoBuff(unittest.TestCase):
                 self.assertIsNone(
                     parse_appsinstalled(err_line.strip())
                 )
+
+    @patch('logging.debug')
+    def test_insert_appinstalled_general_dry(self, mock):
+        memc_addr = '127.0.0.1:33013'
+        appsinstalled = AppsInstalled(
+            'idfa', '1rfw452y52g2gq4g', 55.55, 42.42,
+            [1423, 43, 567, 3, 7, 23]
+        )
+        result = insert_appsinstalled(memc_addr, appsinstalled, dry_run=True)
+        self.assertTrue(result)
+        mock.assert_called_once()
+
+    @patch('pymemcache.client.base.Client.set')
+    def test_insert_appinstalled_real(self, mock):
+        memc_addr = '127.0.0.1:33013'
+        appsinstalled = AppsInstalled(
+            'idfa', '1rfw452y52g2gq4g', 55.55, 42.42,
+            [1423, 43, 567, 3, 7, 23]
+        )
+        result = insert_appsinstalled(memc_addr, appsinstalled,
+                                      dry_run=False)
+        mock.assert_called_once()
+        mock.assert_called_with('idfa:1rfw452y52g2gq4g', _ANY())
+        self.assertTrue(result)
