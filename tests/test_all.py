@@ -1,8 +1,8 @@
 import unittest
-from unittest.mock import patch, _ANY
+from unittest.mock import patch, _ANY, Mock
 import appsinstalled_pb2
 from memc_load import (insert_appsinstalled, parse_appsinstalled,
-                       dot_rename, AppsInstalled)
+                       dot_rename, main, AppsInstalled)
 
 
 class TestUnits(unittest.TestCase):
@@ -90,3 +90,14 @@ class TestUnits(unittest.TestCase):
         mock.assert_called_once()
         mock.assert_called_with('idfa:1rfw452y52g2gq4g', _ANY())
         self.assertTrue(result)
+
+    @patch('memc_load.dot_rename')
+    def test_main_logic(self, return_mock):
+        options = Mock()
+        options.idfa = "127.0.0.1:33013"
+        options.gaid = "127.0.0.1:33014"
+        options.adid = "127.0.0.1:33015"
+        options.dvid = "127.0.0.1:33016"
+        options.pattern = "tests/fixtures/*.tsv.gz"
+        main(options)
+        return_mock.assert_called()

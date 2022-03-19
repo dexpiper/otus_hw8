@@ -4,10 +4,12 @@ import os
 import gzip
 import sys
 import glob
+import time
 import logging
 import collections
 import subprocess
 from optparse import OptionParser
+from threading import Thread
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from pymemcache.client.base import Client
@@ -17,6 +19,7 @@ from pymemcache.exceptions import MemcacheUnexpectedCloseError
 import appsinstalled_pb2
 
 
+MAX_FEATURES = 1000
 NORMAL_ERR_RATE = 0.01
 DEFAULT_DIRECTORY = os.environ.get('DIRLOCATION', '/data/appsinstalled')
 AppsInstalled = collections.namedtuple(
@@ -79,6 +82,35 @@ def parse_appsinstalled(line):
     return AppsInstalled(dev_type, dev_id, lat, lon, apps)
 
 
+class Reader(Thread):
+
+    def __init__(self, all_features):
+        Thread.__init__(self)
+        self.all_features = all_features
+        self.processed = self.errors = 0
+        self.status = False
+
+    def run(self):
+        logging.debug('Running Reader thread')
+        while not self.all_features['list']:
+            logging.debug('Waiting for features...')
+            time.sleep(0.1)
+        for f in as_completed(self.all_features['list']):
+            ok = f.result()
+            if ok:
+                self.processed += 1
+            else:
+                self.errors += 1
+        self.status = True
+
+    def join(self, *args) -> tuple:
+        while not self.status:
+            time.sleep(0.1)
+        logging.debug('Shutting down Reader')
+        Thread.join(self, *args)
+        return self.processed, self.errors
+
+
 def main(options):
     device_memc = {
         "idfa": options.idfa,
@@ -87,7 +119,9 @@ def main(options):
         "dvid": options.dvid,
     }
     for fn in glob.iglob(options.pattern):
-        all_features = []
+        all_features = {'list': []}
+        reader = Reader(all_features)
+        reader.start()
         with ThreadPoolExecutor() as executor:
             processed = errors = 0
             logging.info('Processing %s' % fn)
@@ -112,19 +146,23 @@ def main(options):
                     memc_addr, appsinstalled,
                     options.dry
                 )
-                all_features.append(feature)
+                while len(all_features['list']) > MAX_FEATURES:
+                    logging.debug('Waiting for reader...')
+                    time.sleep(0.1)
+                all_features['list'].append(feature)
 
-            for feature in as_completed(all_features):
-                ok = feature.result()
-                if ok:
-                    processed += 1
-                else:
-                    errors += 1
+            processed, errors = reader.join()
+
             if not processed:
+                logging.info(
+                    'Closing and renaming file %s, no processed lines' %
+                    fn.split('/')[-1]
+                )
                 fd.close()
-                dot_rename(fn)
+                # dot_rename(fn)
                 continue
 
+        logging.info('Errors: %s, Processed: %s' % (errors, processed))
         err_rate = float(errors) / processed
         if err_rate < NORMAL_ERR_RATE:
             logging.info(
@@ -136,7 +174,7 @@ def main(options):
                     )
                 )
         fd.close()
-        dot_rename(fn)
+        # dot_rename(fn)
 
 
 def runtest():
