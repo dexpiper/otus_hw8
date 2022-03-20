@@ -4,13 +4,13 @@ import os
 import gzip
 import sys
 import glob
-import time
 import logging
 import collections
 import subprocess
+import uuid
 from optparse import OptionParser
 from threading import Thread
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from queue import Queue
 
 from pymemcache.client.base import Client
 from pymemcache.client.retrying import RetryingClient
@@ -82,32 +82,65 @@ def parse_appsinstalled(line):
     return AppsInstalled(dev_type, dev_id, lat, lon, apps)
 
 
-class Reader(Thread):
+class Writer(Thread):
+    """
+    Consumes task from task queue and writes results in answer_queue.
+    """
+    def __init__(self, task_queue, answer_queue, handler, dry=False,
+                 _id=str(uuid.uuid4())[:4]):
+        Thread.__init__(self, daemon=True)
+        self.task_queue = task_queue
+        self.answer_queue = answer_queue
+        self.handler = handler
+        self.dry = dry
+        self.__id = _id
+        self.__poison_pill = False
 
-    def __init__(self, all_features):
-        Thread.__init__(self)
-        self.all_features = all_features
-        self.processed = self.errors = 0
-        self.status = False
+    def terminate(self):
+        logging.debug(f'Writer {self.__id} got terminate command')
+        self.__poison_pill = True
 
     def run(self):
-        logging.debug('Running Reader thread')
-        while not self.all_features['list']:
-            logging.debug('Waiting for features...')
-            time.sleep(0.1)
-        for f in as_completed(self.all_features['list']):
-            ok = f.result()
-            if ok:
+        logging.debug(f'Writer {self.__id} started')
+        while not self.__poison_pill:
+            memc_addr, appsinstalled = self.task_queue.get()
+            result = self.handler(memc_addr, appsinstalled, self.dry)
+            self.answer_queue.put(result)
+            self.task_queue.task_done()
+
+    def join(self, *args) -> tuple:
+        logging.debug(f'Shutting down Writer {self.__id}...')
+        Thread.join(self, timeout=0.1)
+
+
+class Reader(Thread):
+    '''
+    Consumes results from answer_queue and returns general result.
+    '''
+    def __init__(self, answer_queue, _id=str(uuid.uuid4())[:4]):
+        Thread.__init__(self, daemon=True)
+        self.answer_queue = answer_queue
+        self.processed = self.errors = 0
+        self.__id = _id
+        self.__poison_pill = False
+
+    def terminate(self):
+        logging.debug(f'Reader {self.__id} got terminate command')
+        self.__poison_pill = True
+
+    def run(self):
+        logging.debug(f'Reader {self.__id} started')
+        while not self.__poison_pill:
+            result_ok = self.answer_queue.get()
+            if result_ok:
                 self.processed += 1
             else:
                 self.errors += 1
-        self.status = True
+            self.answer_queue.task_done()
 
     def join(self, *args) -> tuple:
-        while not self.status:
-            time.sleep(0.1)
-        logging.debug('Shutting down Reader')
-        Thread.join(self, *args)
+        logging.debug(f'Shutting down Reader {self.__id}...')
+        Thread.join(self, timeout=0.1)
         return self.processed, self.errors
 
 
@@ -119,48 +152,62 @@ def main(options):
         "dvid": options.dvid,
     }
     for fn in glob.iglob(options.pattern):
-        all_features = {'list': []}
-        reader = Reader(all_features)
+        task_queue = Queue(maxsize=1000)
+        answer_queue = Queue()
+        reader_pool = [
+            Reader(answer_queue, _id=n) for n in range(options.maxworkers)
+        ]
+        assert len(reader_pool) == options.maxworkers
+        [reader.start() for reader in reader_pool]
+        reader = Reader(answer_queue)
         reader.start()
-        with ThreadPoolExecutor() as executor:
-            processed = errors = 0
-            logging.info('Processing %s' % fn)
-            fd = gzip.open(fn)
-            for line in fd:
-                line = line.strip().decode('utf-8')
-                if not line:
-                    continue
-                appsinstalled = parse_appsinstalled(line)
-                if not appsinstalled:
-                    errors += 1
-                    continue
-                memc_addr = device_memc.get(appsinstalled.dev_type)
-                if not memc_addr:
-                    errors += 1
-                    logging.error(
-                        "Unknown device type: %s" % appsinstalled.dev_type
-                    )
-                    continue
-                feature = executor.submit(
-                    insert_appsinstalled,
-                    memc_addr, appsinstalled,
-                    options.dry
-                )
-                while len(all_features['list']) > MAX_FEATURES:
-                    logging.debug('Waiting for reader...')
-                    time.sleep(0.1)
-                all_features['list'].append(feature)
+        writer_pool = [
+            Writer(task_queue, answer_queue,
+                   insert_appsinstalled,
+                   options.dry, _id=n) for n in range(options.maxworkers)
+        ]
+        assert len(writer_pool) == options.maxworkers
+        [writer.start() for writer in writer_pool]
 
-            processed, errors = reader.join()
-
-            if not processed:
-                logging.info(
-                    'Closing and renaming file %s, no processed lines' %
-                    fn.split('/')[-1]
-                )
-                fd.close()
-                # dot_rename(fn)
+        processed = errors = 0
+        logging.info('Processing %s' % fn)
+        fd = gzip.open(fn)
+        for line in fd:
+            line = line.strip().decode('utf-8')
+            if not line:
                 continue
+            appsinstalled = parse_appsinstalled(line)
+            if not appsinstalled:
+                errors += 1
+                continue
+            memc_addr = device_memc.get(appsinstalled.dev_type)
+            if not memc_addr:
+                errors += 1
+                logging.error(
+                    "Unknown device type: %s" % appsinstalled.dev_type
+                )
+                continue
+            logging.debug('Putting task to queue')
+            task_queue.put((memc_addr, appsinstalled))
+
+        task_queue.join()
+        answer_queue.join()
+        [writer.terminate() for writer in writer_pool]
+        [writer.join() for writer in writer_pool]
+        [reader.terminate() for reader in reader_pool]
+        results_tuple = [reader.join() for reader in reader_pool]
+        for result in results_tuple:
+            processed += result[0]
+            errors += result[1]
+
+        if not processed:
+            logging.info(
+                'Closing and renaming file %s, no processed lines' %
+                fn.split('/')[-1]
+            )
+            fd.close()
+            # dot_rename(fn)
+            continue
 
         logging.info('Errors: %s, Processed: %s' % (errors, processed))
         err_rate = float(errors) / processed

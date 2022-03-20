@@ -94,6 +94,7 @@ class TestUnits(unittest.TestCase):
     @patch('memc_load.dot_rename')
     def test_main_logic(self, return_mock):
         options = Mock()
+        options.maxworkers = 3
         options.idfa = "127.0.0.1:33013"
         options.gaid = "127.0.0.1:33014"
         options.adid = "127.0.0.1:33015"
