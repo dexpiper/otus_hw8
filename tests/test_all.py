@@ -91,7 +91,7 @@ class TestUnits(unittest.TestCase):
         mock.assert_called_with('idfa:1rfw452y52g2gq4g', _ANY())
         self.assertTrue(result)
 
-    @patch('memc_load.dot_rename')
+    @patch('memc_load.dot_rename')  # avoiding renaming fixture
     def test_main_logic(self, return_mock):
         options = Mock()
         options.maxworkers = 3

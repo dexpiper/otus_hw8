@@ -15,6 +15,7 @@ from queue import Queue
 from pymemcache.client.base import Client
 from pymemcache.client.retrying import RetryingClient
 from pymemcache.exceptions import MemcacheUnexpectedCloseError
+import progressbar
 
 import appsinstalled_pb2
 
@@ -152,27 +153,25 @@ def main(options):
         "dvid": options.dvid,
     }
     for fn in glob.iglob(options.pattern):
-        task_queue = Queue(maxsize=1000)
-        answer_queue = Queue()
+        task_queue = Queue(maxsize=4000)
+        answer_queue = Queue(maxsize=4000)
         reader_pool = [
             Reader(answer_queue, _id=n) for n in range(options.maxworkers)
         ]
-        assert len(reader_pool) == options.maxworkers
         [reader.start() for reader in reader_pool]
-        reader = Reader(answer_queue)
-        reader.start()
         writer_pool = [
             Writer(task_queue, answer_queue,
                    insert_appsinstalled,
                    options.dry, _id=n) for n in range(options.maxworkers)
         ]
-        assert len(writer_pool) == options.maxworkers
         [writer.start() for writer in writer_pool]
 
         processed = errors = 0
         logging.info('Processing %s' % fn)
         fd = gzip.open(fn)
-        for line in fd:
+
+        bar = progressbar.ProgressBar(max_value=progressbar.UnknownLength)
+        for i, line in enumerate(fd):
             line = line.strip().decode('utf-8')
             if not line:
                 continue
@@ -187,16 +186,16 @@ def main(options):
                     "Unknown device type: %s" % appsinstalled.dev_type
                 )
                 continue
-            logging.debug('Putting task to queue')
             task_queue.put((memc_addr, appsinstalled))
+            bar.update(i)
 
         task_queue.join()
         answer_queue.join()
         [writer.terminate() for writer in writer_pool]
         [writer.join() for writer in writer_pool]
         [reader.terminate() for reader in reader_pool]
-        results_tuple = [reader.join() for reader in reader_pool]
-        for result in results_tuple:
+        results_tuples = [reader.join() for reader in reader_pool]
+        for result in results_tuples:
             processed += result[0]
             errors += result[1]
 
@@ -206,7 +205,7 @@ def main(options):
                 fn.split('/')[-1]
             )
             fd.close()
-            # dot_rename(fn)
+            dot_rename(fn)
             continue
 
         logging.info('Errors: %s, Processed: %s' % (errors, processed))
@@ -221,7 +220,7 @@ def main(options):
                     )
                 )
         fd.close()
-        # dot_rename(fn)
+        dot_rename(fn)
 
 
 def runtest():
@@ -233,7 +232,8 @@ if __name__ == '__main__':
     op = OptionParser()
     op.add_option("-t", "--test", action="store_true", default=False)
     op.add_option("-l", "--log", action="store", default=None)
-    op.add_option("--maxworkers", action="store", default=3)
+    op.add_option("--maxworkers", action="store", default=5)
+    op.add_option("--loginfo", action="store_true", default=False)
     op.add_option("--dry", action="store_true", default=False)
     op.add_option("--pattern", action="store",
                   default=f"{DEFAULT_DIRECTORY}/*.tsv.gz")
@@ -243,7 +243,11 @@ if __name__ == '__main__':
     op.add_option("--dvid", action="store", default="127.0.0.1:33016")
     (opts, args) = op.parse_args()
     logging.basicConfig(filename=opts.log,
-                        level=logging.INFO if not opts.dry else logging.DEBUG,
+                        level=(
+                            logging.INFO if any([
+                                not opts.dry, opts.loginfo
+                            ]) else logging.DEBUG
+                        ),
                         format='[%(asctime)s] %(levelname).1s %(message)s',
                         datefmt='%Y.%m.%d %H:%M:%S')
     if opts.test:
