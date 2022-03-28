@@ -12,7 +12,7 @@ from optparse import OptionParser
 from threading import Thread
 from queue import Queue
 
-from pymemcache.client.base import Client
+from pymemcache.client.base import PooledClient
 from pymemcache.client.retrying import RetryingClient
 from pymemcache.exceptions import MemcacheUnexpectedCloseError
 import progressbar
@@ -32,13 +32,30 @@ AppsInstalled = collections.namedtuple(
 )
 
 
+def create_mmc_pool(memc_addresses: dict, maxsize: int) -> dict:
+    memc_pool = {}
+    for memc_name in memc_addresses.keys():
+        base_client = PooledClient(
+            server=memc_addresses[memc_name], connect_timeout=0.5,
+            timeout=0.3, max_pool_size=maxsize
+        )
+        memc = RetryingClient(
+            base_client,
+            attempts=3,
+            retry_delay=0.01,
+            retry_for=[MemcacheUnexpectedCloseError]
+        )
+        memc_pool[memc_name] = memc
+    return memc_pool
+
+
 def dot_rename(path):
     head, fn = os.path.split(path)
     # atomic in most cases
     os.rename(path, os.path.join(head, "." + fn))
 
 
-def insert_appsinstalled(memc_addr, appsinstalled, dry_run=False):
+def insert_appsinstalled(memc, appsinstalled, dry_run=False):
     ua = appsinstalled_pb2.UserApps()
     ua.lat = appsinstalled.lat
     ua.lon = appsinstalled.lon
@@ -48,18 +65,12 @@ def insert_appsinstalled(memc_addr, appsinstalled, dry_run=False):
     try:
         if dry_run:
             logging.debug(
-                "%s - %s -> %s" % (memc_addr, key, str(ua).replace("\n", " ")))
+                "%s - %s -> %s" % (
+                    memc.server, key, str(ua).replace("\n", " ")))
         else:
-            base_client = Client(memc_addr, connect_timeout=0.5, timeout=0.3)
-            memc = RetryingClient(
-                base_client,
-                attempts=3,
-                retry_delay=0.01,
-                retry_for=[MemcacheUnexpectedCloseError]
-            )
             memc.set(key, packed)
     except Exception as e:
-        logging.exception("Cannot write to memc %s: %s" % (memc_addr, e))
+        logging.exception("Cannot write to memc %s: %s" % (memc.server, e))
         return False
     return True
 
@@ -83,7 +94,7 @@ def parse_appsinstalled(line):
     return AppsInstalled(dev_type, dev_id, lat, lon, apps)
 
 
-class Writer(Thread):
+class MemcacheWriter(Thread):
     """
     Consumes task from task queue and writes results in answer_queue.
     """
@@ -104,8 +115,8 @@ class Writer(Thread):
     def run(self):
         logging.debug(f'Writer {self.__id} started')
         while not self.__poison_pill:
-            memc_addr, appsinstalled = self.task_queue.get()
-            result = self.handler(memc_addr, appsinstalled, self.dry)
+            memc, appsinstalled = self.task_queue.get()
+            result = self.handler(memc, appsinstalled, self.dry)
             self.answer_queue.put(result)
             self.task_queue.task_done()
 
@@ -114,7 +125,7 @@ class Writer(Thread):
         Thread.join(self, timeout=0.1)
 
 
-class Reader(Thread):
+class TsvReader(Thread):
     '''
     Consumes results from answer_queue and returns general result.
     '''
@@ -152,17 +163,19 @@ def main(options):
         "adid": options.adid,
         "dvid": options.dvid,
     }
+    memc_pool: dict = create_mmc_pool(device_memc, options.maxworkers)
     for fn in glob.iglob(options.pattern):
         task_queue = Queue(maxsize=4000)
         answer_queue = Queue(maxsize=4000)
         reader_pool = [
-            Reader(answer_queue, _id=n) for n in range(options.maxworkers)
+            TsvReader(answer_queue, _id=n) for n in range(options.maxworkers)
         ]
         [reader.start() for reader in reader_pool]
         writer_pool = [
-            Writer(task_queue, answer_queue,
-                   insert_appsinstalled,
-                   options.dry, _id=n) for n in range(options.maxworkers)
+            MemcacheWriter(
+                task_queue, answer_queue, insert_appsinstalled,
+                options.dry, _id=n
+            ) for n in range(options.maxworkers)
         ]
         [writer.start() for writer in writer_pool]
 
@@ -179,14 +192,14 @@ def main(options):
             if not appsinstalled:
                 errors += 1
                 continue
-            memc_addr = device_memc.get(appsinstalled.dev_type)
-            if not memc_addr:
+            memc = memc_pool.get(appsinstalled.dev_type)
+            if not memc:
                 errors += 1
                 logging.error(
                     "Unknown device type: %s" % appsinstalled.dev_type
                 )
                 continue
-            task_queue.put((memc_addr, appsinstalled))
+            task_queue.put((memc, appsinstalled))
             bar.update(i)
 
         task_queue.join()

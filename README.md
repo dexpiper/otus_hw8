@@ -4,7 +4,7 @@
 
 cd to directory with memc_load.py
 
-`$ python3 -m memx_load [-t --test] [-l --log] [--maxworkers] [--loginfo] [--dry] [--pattern] [--idfa] [--gaid] [--adid] [--dvid]`
+`$ python3 -m memc_load [-t --test] [-l --log] [--maxworkers] [--loginfo] [--dry] [--pattern] [--idfa] [--gaid] [--adid] [--dvid]`
 
 * --test: run tests
 * --log: store logs in <i>filename</i>

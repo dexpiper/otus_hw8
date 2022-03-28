@@ -68,27 +68,29 @@ class TestUnits(unittest.TestCase):
                 )
 
     @patch('logging.debug')
-    def test_insert_appinstalled_general_dry(self, mock):
-        memc_addr = '127.0.0.1:33013'
+    def test_insert_appinstalled_general_dry(self, logging_mock):
+        memc_mock = Mock()
+        memc_mock.server = '127.0.0.1:33013'
         appsinstalled = AppsInstalled(
             'idfa', '1rfw452y52g2gq4g', 55.55, 42.42,
             [1423, 43, 567, 3, 7, 23]
         )
-        result = insert_appsinstalled(memc_addr, appsinstalled, dry_run=True)
+        result = insert_appsinstalled(memc_mock, appsinstalled, dry_run=True)
         self.assertTrue(result)
-        mock.assert_called_once()
+        logging_mock.assert_called_once()
 
-    @patch('pymemcache.client.base.Client.set')
-    def test_insert_appinstalled_real(self, mock):
-        memc_addr = '127.0.0.1:33013'
+    def test_insert_appinstalled_real(self):
+        memc_mock = Mock()
+        memc_mock.server = '127.0.0.1:33013'
+        memc_mock.set.side_effect = lambda x, y: True
         appsinstalled = AppsInstalled(
             'idfa', '1rfw452y52g2gq4g', 55.55, 42.42,
             [1423, 43, 567, 3, 7, 23]
         )
-        result = insert_appsinstalled(memc_addr, appsinstalled,
+        result = insert_appsinstalled(memc_mock, appsinstalled,
                                       dry_run=False)
-        mock.assert_called_once()
-        mock.assert_called_with('idfa:1rfw452y52g2gq4g', _ANY())
+        memc_mock.set.assert_called_once()
+        memc_mock.set.assert_called_with('idfa:1rfw452y52g2gq4g', _ANY())
         self.assertTrue(result)
 
     @patch('memc_load.dot_rename')  # avoiding renaming fixture
