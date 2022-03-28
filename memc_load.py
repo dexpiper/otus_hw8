@@ -62,15 +62,17 @@ def insert_appsinstalled(memc, appsinstalled, dry_run=False):
     key = "%s:%s" % (appsinstalled.dev_type, appsinstalled.dev_id)
     ua.apps.extend(appsinstalled.apps)
     packed = ua.SerializeToString()
+    ip, port = memc._client.__getattribute__('server')
+    server_address = ':'.join((ip, str(port)))
     try:
         if dry_run:
             logging.debug(
                 "%s - %s -> %s" % (
-                    memc.server, key, str(ua).replace("\n", " ")))
+                    server_address, key, str(ua).replace("\n", " ")))
         else:
             memc.set(key, packed)
     except Exception as e:
-        logging.exception("Cannot write to memc %s: %s" % (memc.server, e))
+        logging.exception("Cannot write to memc %s: %s" % (server_address, e))
         return False
     return True
 
