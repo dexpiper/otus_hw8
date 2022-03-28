@@ -70,7 +70,7 @@ class TestUnits(unittest.TestCase):
     @patch('logging.debug')
     def test_insert_appinstalled_general_dry(self, logging_mock):
         memc_mock = Mock()
-        memc_mock.server = '127.0.0.1:33013'
+        memc_mock._client.server = ('127.0.0.1', 33013)
         appsinstalled = AppsInstalled(
             'idfa', '1rfw452y52g2gq4g', 55.55, 42.42,
             [1423, 43, 567, 3, 7, 23]
@@ -81,7 +81,7 @@ class TestUnits(unittest.TestCase):
 
     def test_insert_appinstalled_real(self):
         memc_mock = Mock()
-        memc_mock.server = '127.0.0.1:33013'
+        memc_mock._client.server = ('127.0.0.1', 33013)
         memc_mock.set.side_effect = lambda x, y: True
         appsinstalled = AppsInstalled(
             'idfa', '1rfw452y52g2gq4g', 55.55, 42.42,
