@@ -9,7 +9,7 @@ import collections
 import subprocess
 import uuid
 from optparse import OptionParser
-from threading import Thread
+from threading import Thread, Lock
 from queue import Queue
 
 from pymemcache.client.base import PooledClient
@@ -98,15 +98,26 @@ def parse_appsinstalled(line):
 
 class MemcacheWriter(Thread):
     """
-    Consumes task from task queue and writes results in answer_queue.
+    Consumes task from task queue and writes results in memcache.
     """
-    def __init__(self, task_queue, answer_queue, handler, dry=False,
-                 _id=str(uuid.uuid4())[:4]):
+    def __init__(self, task_queue, handler, results: dict,
+                 lock, dry=False, _id=str(uuid.uuid4())[:4]):
+        '''
+        * task_queue - threading.Queue object with tasks
+        * handler - function to do with task
+        * results - dictionary with 'processed' and 'errors'
+        * lock - threading.Lock object
+        * dry - if a dry run requested, don't store data in memchached
+        * _id - Writer number
+
+        Results and lock should be defined outside Writer.
+        '''
         Thread.__init__(self, daemon=True)
         self.task_queue = task_queue
-        self.answer_queue = answer_queue
         self.handler = handler
+        self.lock = lock
         self.dry = dry
+        self.results = results
         self.__id = _id
         self.__poison_pill = False
 
@@ -118,44 +129,18 @@ class MemcacheWriter(Thread):
         logging.debug(f'Writer {self.__id} started')
         while not self.__poison_pill:
             memc, appsinstalled = self.task_queue.get()
-            result = self.handler(memc, appsinstalled, self.dry)
-            self.answer_queue.put(result)
+            result_ok = self.handler(memc, appsinstalled, self.dry)
+            self.lock.acquire()
+            if result_ok:
+                self.results['processed'] += 1
+            else:
+                self.results['errors'] += 1
+            self.lock.release()
             self.task_queue.task_done()
 
     def join(self, *args) -> tuple:
         logging.debug(f'Shutting down Writer {self.__id}...')
         Thread.join(self, timeout=0.1)
-
-
-class TsvReader(Thread):
-    '''
-    Consumes results from answer_queue and returns general result.
-    '''
-    def __init__(self, answer_queue, _id=str(uuid.uuid4())[:4]):
-        Thread.__init__(self, daemon=True)
-        self.answer_queue = answer_queue
-        self.processed = self.errors = 0
-        self.__id = _id
-        self.__poison_pill = False
-
-    def terminate(self):
-        logging.debug(f'Reader {self.__id} got terminate command')
-        self.__poison_pill = True
-
-    def run(self):
-        logging.debug(f'Reader {self.__id} started')
-        while not self.__poison_pill:
-            result_ok = self.answer_queue.get()
-            if result_ok:
-                self.processed += 1
-            else:
-                self.errors += 1
-            self.answer_queue.task_done()
-
-    def join(self, *args) -> tuple:
-        logging.debug(f'Shutting down Reader {self.__id}...')
-        Thread.join(self, timeout=0.1)
-        return self.processed, self.errors
 
 
 def main(options):
@@ -168,20 +153,22 @@ def main(options):
     memc_pool: dict = create_mmc_pool(device_memc, options.maxworkers)
     for fn in glob.iglob(options.pattern):
         task_queue = Queue(maxsize=4000)
-        answer_queue = Queue(maxsize=4000)
-        reader_pool = [
-            TsvReader(answer_queue, _id=n) for n in range(options.maxworkers)
-        ]
-        [reader.start() for reader in reader_pool]
+        lock = Lock()
+        results = {
+            'processed': 0,
+            'errors': 0
+        }
         writer_pool = [
             MemcacheWriter(
-                task_queue, answer_queue, insert_appsinstalled,
-                options.dry, _id=n
+                task_queue=task_queue,
+                handler=insert_appsinstalled,
+                results=results,
+                lock=lock,
+                dry=options.dry,
+                _id=n
             ) for n in range(options.maxworkers)
         ]
         [writer.start() for writer in writer_pool]
-
-        processed = errors = 0
         logging.info('Processing %s' % fn)
         fd = gzip.open(fn)
 
@@ -192,11 +179,15 @@ def main(options):
                 continue
             appsinstalled = parse_appsinstalled(line)
             if not appsinstalled:
-                errors += 1
+                lock.acquire()
+                results['errors'] += 1
+                lock.release()
                 continue
             memc = memc_pool.get(appsinstalled.dev_type)
             if not memc:
-                errors += 1
+                lock.acquire()
+                results['errors'] += 1
+                lock.release()
                 logging.error(
                     "Unknown device type: %s" % appsinstalled.dev_type
                 )
@@ -205,14 +196,11 @@ def main(options):
             bar.update(i)
 
         task_queue.join()
-        answer_queue.join()
         [writer.terminate() for writer in writer_pool]
         [writer.join() for writer in writer_pool]
-        [reader.terminate() for reader in reader_pool]
-        results_tuples = [reader.join() for reader in reader_pool]
-        for result in results_tuples:
-            processed += result[0]
-            errors += result[1]
+
+        processed = results['processed']
+        errors = results['errors']
 
         if not processed:
             logging.info(
